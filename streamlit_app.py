@@ -1,9 +1,10 @@
 import streamlit as st
 import pandas as pd
+import snowflake.connector
 
 # -------------------------------------------------
 # E-COMMERCE SALES INTELLIGENCE DASHBOARD
-# Backend objects required:
+# Backend objects required in Snowflake:
 #   SALES_CLEANED
 #   CUSTOMER_SEGMENTS
 #   COHORT_MONTHLY
@@ -15,13 +16,38 @@ import pandas as pd
 
 st.title("E-Commerce Sales Intelligence Dashboard")
 
-conn = st.connection("snowflake")
+# =======================
+# Snowflake connection helpers
+# =======================
+
+@st.cache_resource
+def get_connection():
+    cfg = st.secrets["snowflake"]
+    conn = snowflake.connector.connect(
+        user=cfg["user"],
+        password=cfg["password"],
+        account=cfg["account"],
+        warehouse=cfg["warehouse"],
+        database=cfg["database"],
+        schema=cfg["schema"],
+    )
+    return conn
+
+@st.cache_data(show_spinner=False)
+def run_query(sql: str) -> pd.DataFrame:
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        return cur.fetch_pandas_all()
+    finally:
+        cur.close()
 
 # =======================
 # Sidebar filters
 # =======================
 
-meta = conn.query("""
+meta = run_query("""
     SELECT MIN(INVOICE_DATE) AS MIN_DATE,
            MAX(INVOICE_DATE) AS MAX_DATE
     FROM SALES_CLEANED;
@@ -38,7 +64,7 @@ start_date, end_date = st.sidebar.date_input(
 )
 
 # Country filter
-countries_df = conn.query("""
+countries_df = run_query("""
     SELECT DISTINCT COUNTRY
     FROM SALES_CLEANED
     ORDER BY COUNTRY;
@@ -92,7 +118,7 @@ if selected_countries:
 # =======================
 with tab_overview:
     # Monthly revenue with moving average and anomalies
-    monthly = conn.query(f"""
+    monthly = run_query(f"""
         SELECT DATE_TRUNC('month', INVOICE_DATE) AS MONTH,
                ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_REVENUE
         FROM SALES_CLEANED
@@ -107,7 +133,7 @@ with tab_overview:
         monthly["PCT_CHANGE"] = monthly["TOTAL_REVENUE"].pct_change() * 100
 
     # KPI block
-    kpis = conn.query(f"""
+    kpis = run_query(f"""
         SELECT
             ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_REVENUE,
             COUNT(DISTINCT INVOICE_NO)  AS NUM_ORDERS,
@@ -158,7 +184,7 @@ with tab_overview:
 
     # Estimated profit chart using SALES_PROFIT
     st.subheader("💹 Estimated Monthly Profit (35% of revenue)")
-    profit = conn.query(f"""
+    profit = run_query(f"""
         SELECT DATE_TRUNC('month', INVOICE_DATE) AS MONTH,
                SUM(EST_PROFIT) AS PROFIT
         FROM SALES_PROFIT
@@ -173,7 +199,7 @@ with tab_overview:
 
     # Revenue by weekday
     st.subheader("🗓️ Revenue by Weekday")
-    weekday = conn.query(f"""
+    weekday = run_query(f"""
         SELECT TO_VARCHAR(DAYNAME(INVOICE_DATE)) AS WEEKDAY,
                ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_REVENUE
         FROM SALES_CLEANED
@@ -192,7 +218,7 @@ with tab_overview:
 with tab_countries:
     st.subheader("🌍 Revenue by Country")
 
-    country_rev = conn.query(f"""
+    country_rev = run_query(f"""
         SELECT COUNTRY,
                ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_REVENUE
         FROM SALES_CLEANED
@@ -213,7 +239,7 @@ with tab_countries:
 with tab_products:
     st.subheader("🏆 Top 10 Products (by revenue)")
 
-    top_products = conn.query(f"""
+    top_products = run_query(f"""
         SELECT DESCRIPTION,
                ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_REVENUE
         FROM SALES_CLEANED
@@ -234,7 +260,7 @@ with tab_products:
 with tab_customers:
     st.subheader("💰 Top 10 Customers")
 
-    customers = conn.query(f"""
+    customers = run_query(f"""
         SELECT CUSTOMER_ID,
                ROUND(SUM(TOTAL_AMOUNT), 2) AS TOTAL_SPENT,
                COUNT(DISTINCT INVOICE_NO) AS ORDERS
@@ -275,7 +301,7 @@ with tab_customers:
 with tab_rfm:
     st.subheader("📊 RFM Customer Segments")
 
-    seg = conn.query("SELECT * FROM CUSTOMER_SEGMENTS;")
+    seg = run_query("SELECT * FROM CUSTOMER_SEGMENTS;")
 
     if not seg.empty:
         seg_counts = (
@@ -301,7 +327,7 @@ with tab_rfm:
 with tab_cohort:
     st.subheader("🧩 Cohort Retention (customers by month offset)")
 
-    cohort = conn.query("SELECT * FROM COHORT_MONTHLY;")
+    cohort = run_query("SELECT * FROM COHORT_MONTHLY;")
     if not cohort.empty:
         pivot = cohort.pivot_table(
             index="COHORT_MONTH",
@@ -319,7 +345,7 @@ with tab_cohort:
 with tab_pairs:
     st.subheader("🔗 Frequently Bought Together (top pairs)")
 
-    pairs = conn.query("""
+    pairs = run_query("""
         SELECT PRODUCT_A_NAME, PRODUCT_B_NAME, NUM_ORDERS
         FROM PRODUCT_PAIRS
         ORDER BY NUM_ORDERS DESC
@@ -344,7 +370,7 @@ with tab_pairs:
 with tab_quality:
     st.subheader("🧪 Data Quality Metrics")
 
-    dq = conn.query("SELECT * FROM DATA_QUALITY_METRICS;")
+    dq = run_query("SELECT * FROM DATA_QUALITY_METRICS;")
     if not dq.empty:
         row = dq.iloc[0]
         col1, col2 = st.columns(2)
@@ -369,7 +395,7 @@ with tab_quality:
 with tab_value:
     st.subheader("💎 Customer Lifetime Value and Churn Risk")
 
-    val = conn.query("SELECT * FROM CUSTOMER_VALUE;")
+    val = run_query("SELECT * FROM CUSTOMER_VALUE;")
 
     if not val.empty:
         # distribution by lifecycle stage
@@ -416,6 +442,6 @@ with tab_value:
         st.info("CUSTOMER_VALUE view is empty or missing.")
 
 st.caption(
-    "Backend: Snowflake | Frontend: Streamlit in Snowflake | "
+    "Backend: Snowflake | Frontend: Streamlit Community Cloud | "
     "Dataset: Online Retail transactions (demo project)"
 )
